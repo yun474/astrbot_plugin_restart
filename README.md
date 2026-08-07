@@ -10,7 +10,7 @@ _✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 重启插件 ✨_
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-3.4%2B-orange.svg)](https://github.com/Soulter/AstrBot)
-[![GitHub](https://img.shields.io/badge/作者-Zhalslar-blue)](https://github.com/Zhalslar)
+[![GitHub](https://img.shields.io/badge/维护-yun474-blue)](https://github.com/yun474)
 
 </div>
 
@@ -20,6 +20,8 @@ _✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 重启插件 ✨_
 
 用命令重启、定时自动重启 AstrBot
 
+本仓库基于 [Zhalslar/astrbot_plugin_restart](https://github.com/Zhalslar/astrbot_plugin_restart) 修改维护。
+
 ## 📦 安装
 
 - 可以直接在astrbot的插件市场搜索astrbot_plugin_restart，点击安装，耐心等待安装完成即可
@@ -28,7 +30,7 @@ _✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 重启插件 ✨_
 ```bash
 # 克隆仓库到插件目录
 cd /AstrBot/data/plugins
-git clone https://github.com/Zhalslar/astrbot_plugin_restart
+git clone https://github.com/yun474/astrbot_plugin_restart
 
 # 控制台重启AstrBot
 ```
@@ -39,11 +41,44 @@ git clone https://github.com/Zhalslar/astrbot_plugin_restart
 
 |     命令      |                    说明                    |
 |:-------------:|:-----------------------------------------------:|
-| 重启   | 重启 AstrBot  |
-| 定时重启 HH:MM   | 在指定时间点（如12:30）重启 AstrBot  |
-| 定时重启 <秒数>   |  每隔<秒数>秒重启 AstrBot  |
+| 重启 / restart | 重启 AstrBot |
+| 定时重启 开 | 开启按 Cron 表达式定时重启 |
+| 定时重启 关 | 关闭定时重启 |
 
-### 示例图
+### 自定义重启提示词
+
+在插件配置页可修改：
+
+- `发起重启提示词`：收到手动重启命令时发送。
+- `重启完成提示词`：AstrBot 重启后，原会话平台恢复可用时发送。
+
+两种提示词均支持以下占位符：
+
+| 占位符 | 内容 | 示例 |
+|:--|:--|:--|
+| `{memory}` | 当前已用/总内存及占用率 | `8.5GB/16.0GB(53.1%)` |
+| `{used_memory}` | 当前已用内存 | `8.5GB` |
+| `{available_memory}` | 当前可用内存 | `7.5GB` |
+| `{total_memory}` | 总内存 | `16.0GB` |
+| `{memory_percent}` | 当前内存占用率 | `53.1%` |
+| `{before_memory}` | 发起重启前的完整内存信息 | `8.5GB/16.0GB(53.1%)` |
+| `{after_memory}` | 重启后的完整内存信息 | `7.9GB/16.0GB(49.4%)` |
+| `{elapsed}` | 从发起重启到通知发送的耗时（秒） | `12.34` |
+| `{start_time}` | 发起重启时间 | `2026-08-07 09:30:00` |
+| `{finish_time}` | 提示词渲染时间 | `2026-08-07 09:30:12` |
+| `{memory_line}` | 兼容原“显示内存”开关的整行文本 | `\n内存：8.5GB/16.0GB(53.1%)` |
+
+例如，可将完成提示设置为：
+
+```text
+AstrBot 回来了，用时 {elapsed} 秒
+重启前：{before_memory}
+重启后：{after_memory}
+```
+
+未知占位符会原样保留；花括号格式错误时会回退到默认提示词并记录警告。`显示内存使用情况` 开关只控制默认模板中的 `{memory_line}`，不会屏蔽你主动写入自定义模板的内存占位符。
+
+> 定时重启没有命令来源会话，因此不会发送发起/完成提示；自定义提示用于手动执行 `重启` / `restart` 的场景。
 
 ## 👥 贡献指南
 
@@ -54,4 +89,4 @@ git clone https://github.com/Zhalslar/astrbot_plugin_restart
 
 ## 📌 注意事项
 
-- 想第一时间得到反馈的可以来作者的插件反馈群（QQ群）：460973561（不点star不给进）
+- 本修改版问题请在 [yun474/astrbot_plugin_restart](https://github.com/yun474/astrbot_plugin_restart/issues) 提交 Issue。

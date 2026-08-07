@@ -1,6 +1,8 @@
 # restart_plugin.py
 import asyncio
 import time
+from contextlib import suppress
+from datetime import datetime
 from typing import Any
 
 from astrbot.api import logger
@@ -10,14 +12,18 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.message.components import Plain
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
-from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_platform_adapter import (
-    AiocqhttpAdapter,
-)
 from astrbot.core.star.star_manager import PluginManager
 
 from .dashboard_client import DashboardClient
 from .restart_scheduler import RestartScheduler
-from .utils import cron_to_human, get_memory_info
+from .utils import cron_to_human, format_prompt, get_memory_placeholders
+
+
+DEFAULT_RESTART_PROMPT = "正在重启 AstrBot…"
+DEFAULT_COMPLETED_PROMPT = "AstrBot 重启完成（耗时 {elapsed} 秒）{memory_line}"
+NOTIFICATION_TIMEOUT = 120
+NOTIFICATION_RETRY_INTERVAL = 2
+SEND_TIMEOUT = 10
 
 
 class RestartPlugin(Star):
@@ -27,7 +33,9 @@ class RestartPlugin(Star):
         self.star_manager: PluginManager = self.context._star_manager  # type: ignore
         self.config = config
         self.cache: dict[str, Any] = config.get("restart_cache", {})
+        self.config["restart_cache"] = self.cache
         self.restart_cron = config.get("restart_cron")
+        self._notification_task: asyncio.Task | None = None
 
     # ================== 生命周期 ==================
 
@@ -37,16 +45,63 @@ class RestartPlugin(Star):
         self.scheduler = RestartScheduler(self.context, self.config, self.dashboard)
         if self.config["restart_switch"]:
             await self.scheduler.start()
+        # 插件会早于平台初始化。主动重试恢复通知，避免依赖一次性的
+        # on_platform_loaded / WebSocket 回调所产生的启动竞态。
+        self._notification_task = asyncio.create_task(
+            self._send_completed_notification_when_ready(),
+            name="restart_completed_notification",
+        )
 
     async def terminate(self):
+        if self._notification_task and not self._notification_task.done():
+            self._notification_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._notification_task
         await self.dashboard.terminate()
         await self.scheduler.shutdown()
         logger.info("重启插件已终止")
 
     # ================== 重启完成通知 ==================
 
-    @filter.on_platform_loaded()
-    async def on_platform_loaded(self):
+    def _prompt_values(
+        self,
+        *,
+        restart_start_ts: float,
+        before_memory: str,
+    ) -> dict[str, str]:
+        memory = get_memory_placeholders()
+        now = time.time()
+        memory_line = (
+            f"\n内存：{memory['memory']}"
+            if self.config.get("show_memory_info", True)
+            else ""
+        )
+        return {
+            **memory,
+            "before_memory": before_memory,
+            "after_memory": memory["memory"],
+            "memory_line": memory_line,
+            "elapsed": f"{max(0, now - restart_start_ts):.2f}",
+            "start_time": datetime.fromtimestamp(restart_start_ts).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
+            "finish_time": datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    def _render_prompt(
+        self,
+        config_key: str,
+        default: str,
+        values: dict[str, str],
+    ) -> str:
+        template = str(self.config.get(config_key) or default)
+        try:
+            return format_prompt(template, values)
+        except (ValueError, AttributeError) as exc:
+            logger.warning(f"提示词 {config_key} 格式错误，已使用默认值：{exc}")
+            return format_prompt(default, values)
+
+    async def _send_completed_notification_when_ready(self):
         platform_id = self.cache.get("platform_id")
         restart_umo = self.cache.get("umo")
         restart_start_ts = self.cache.get("start_ts")
@@ -54,39 +109,53 @@ class RestartPlugin(Star):
         if not restart_umo or not platform_id or not restart_start_ts:
             return
 
-        platform = self.context.get_platform_inst(platform_id)
-        if not isinstance(platform, AiocqhttpAdapter):
-            return
+        restart_start_ts = float(restart_start_ts)
+        deadline = time.monotonic() + NOTIFICATION_TIMEOUT
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            if self.context.get_platform_inst(str(platform_id)) is None:
+                await asyncio.sleep(NOTIFICATION_RETRY_INTERVAL)
+                continue
 
-        client = platform.get_client()
-        if not client:
-            return
+            try:
+                values = self._prompt_values(
+                    restart_start_ts=restart_start_ts,
+                    before_memory=str(self.cache.get("memory_before") or "未知"),
+                )
+                msg = self._render_prompt(
+                    "restart_completed_prompt",
+                    DEFAULT_COMPLETED_PROMPT,
+                    values,
+                )
+                sent = await asyncio.wait_for(
+                    self.context.send_message(
+                        session=str(restart_umo),
+                        message_chain=MessageChain([Plain(msg)]),
+                    ),
+                    timeout=SEND_TIMEOUT,
+                )
+                if sent:
+                    self._clear_restart_cache()
+                    logger.info("重启完成通知已发送")
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                logger.warning(f"重启完成通知发送失败，将重试：{exc}")
 
-        ws_connected = asyncio.Event()
+            await asyncio.sleep(NOTIFICATION_RETRY_INTERVAL)
 
-        @client.on_websocket_connection
-        def _(_):
-            ws_connected.set()
-
-        try:
-            await asyncio.wait_for(ws_connected.wait(), timeout=10)
-        except asyncio.TimeoutError:
-            logger.warning("WebSocket 连接等待超时")
-
-        elapsed = time.time() - float(restart_start_ts)
-        msg = f"AstrBot重启完成（耗时{elapsed:.2f}秒）"
-
-        if self.config["show_memory_info"]:
-            memory_info = get_memory_info()
-            msg += f"\n内存：{memory_info}"
-
-        await self.context.send_message(
-            session=restart_umo,
-            message_chain=MessageChain([Plain(msg)]),
+        logger.error(
+            f"重启完成通知在 {NOTIFICATION_TIMEOUT} 秒内发送失败，"
+            f"缓存已保留供下次启动重试：{last_error or '平台未就绪'}"
         )
+
+    def _clear_restart_cache(self) -> None:
         self.cache["platform_id"] = ""
         self.cache["umo"] = ""
         self.cache["start_ts"] = 0
+        self.cache["memory_before"] = ""
         self.config.save_config()
 
     # ================== 命令 ==================
@@ -95,10 +164,19 @@ class RestartPlugin(Star):
     @filter.command("重启", alias={"restart"})
     async def restart_system(self, event: AstrMessageEvent):
         """重启Astrbot"""
-        await event.send(event.plain_result("正在重启 AstrBot…"))
+        restart_start_ts = time.time()
+        memory = get_memory_placeholders()
+        values = self._prompt_values(
+            restart_start_ts=restart_start_ts,
+            before_memory=memory["memory"],
+        )
+        msg = self._render_prompt("restart_prompt", DEFAULT_RESTART_PROMPT, values)
+        if msg:
+            await event.send(event.plain_result(msg))
         self.cache["platform_id"] = event.get_platform_id()
         self.cache["umo"] = event.unified_msg_origin
-        self.cache["start_ts"] = time.time()
+        self.cache["start_ts"] = restart_start_ts
+        self.cache["memory_before"] = memory["memory"]
         self.config.save_config()
 
         await self.dashboard.restart()

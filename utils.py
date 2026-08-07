@@ -1,4 +1,17 @@
 # utils.py
+from typing import Any
+
+
+class SafeFormatDict(dict[str, Any]):
+    """保留未知占位符，避免配置笔误阻断重启。"""
+
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+def format_prompt(template: str, values: dict[str, Any]) -> str:
+    """使用给定值渲染提示词，未知占位符保持原样。"""
+    return template.format_map(SafeFormatDict(values))
 
 
 def cron_to_human(cron: str) -> str:
@@ -68,8 +81,7 @@ def cron_to_human(cron: str) -> str:
     return " ".join(desc)
 
 
-
-def get_memory_info(decimal_places=1):
+def get_memory_placeholders(decimal_places: int = 1) -> dict[str, str]:
     """
     获取当前设备内存情况，支持自定义小数位数
 
@@ -77,23 +89,40 @@ def get_memory_info(decimal_places=1):
         decimal_places (int): 小数位数，默认为1位
 
     Returns:
-        str: 已用内存/总内存(百分比) 格式，如 "8.5GB/16.0GB(53.2%)"
+        可直接用于提示词渲染的内存信息字典。
     """
     import psutil
+
     # 获取内存信息
     memory = psutil.virtual_memory()
 
     # 计算已用内存 (总内存 - 可用内存)
     total_memory = memory.total
+    available_memory = memory.available
     used_memory = total_memory - memory.available
 
     # 转换为GB单位
     total_gb = total_memory / (1024**3)
+    available_gb = available_memory / (1024**3)
     used_gb = used_memory / (1024**3)
 
     # 计算使用百分比
     usage_percent = (used_memory / total_memory) * 100
 
-    # 格式化输出，使用指定的小数位数
-    format_str = f"{{:.{decimal_places}f}}GB/{{:.{decimal_places}f}}GB({{:.1f}}%)"
-    return format_str.format(used_gb, total_gb, usage_percent)
+    number_format = f"{{:.{decimal_places}f}}GB"
+    used = number_format.format(used_gb)
+    available = number_format.format(available_gb)
+    total = number_format.format(total_gb)
+    percent = f"{usage_percent:.1f}%"
+    return {
+        "memory": f"{used}/{total}({percent})",
+        "used_memory": used,
+        "available_memory": available,
+        "total_memory": total,
+        "memory_percent": percent,
+    }
+
+
+def get_memory_info(decimal_places: int = 1) -> str:
+    """兼容旧调用：返回“已用/总量(占用率)”格式的内存信息。"""
+    return get_memory_placeholders(decimal_places)["memory"]

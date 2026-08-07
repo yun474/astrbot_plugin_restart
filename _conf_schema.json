@@ -12,9 +12,22 @@
         "default": "0 5 * * *"
     },
     "show_memory_info": {
-        "description": "重启完后显示内存使用情况",
+        "description": "默认完成提示中显示内存使用情况",
+        "hint": "仅控制默认模板中的 {memory_line}；自定义模板可直接使用其他内存占位符",
         "type": "bool",
         "default": true
+    },
+    "restart_prompt": {
+        "description": "发起重启提示词",
+        "hint": "支持 {memory}、{used_memory}、{available_memory}、{total_memory}、{memory_percent}、{start_time} 等占位符",
+        "type": "text",
+        "default": "正在重启 AstrBot…"
+    },
+    "restart_completed_prompt": {
+        "description": "重启完成提示词",
+        "hint": "支持 {elapsed}、{before_memory}、{after_memory}、{memory_line}、{finish_time} 等占位符，完整列表见 README",
+        "type": "text",
+        "default": "AstrBot 重启完成（耗时 {elapsed} 秒）{memory_line}"
     },
     "restart_cache": {
         "description": "重启缓存区",
@@ -32,6 +45,10 @@
             "start_ts": {
                 "description": "重启命令发送时间",
                 "type": "float"
+            },
+            "memory_before": {
+                "description": "重启前内存信息",
+                "type": "string"
             }
         }
     }
