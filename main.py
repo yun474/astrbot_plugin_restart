@@ -24,6 +24,7 @@ DEFAULT_COMPLETED_PROMPT = "AstrBot 重启完成（耗时 {elapsed} 秒）{memor
 NOTIFICATION_TIMEOUT = 120
 NOTIFICATION_RETRY_INTERVAL = 2
 SEND_TIMEOUT = 10
+QQ_OFFICIAL_PLATFORM_NAME = "qq_official"
 
 
 class RestartPlugin(Star):
@@ -101,6 +102,41 @@ class RestartPlugin(Star):
             logger.warning(f"提示词 {config_key} 格式错误，已使用默认值：{exc}")
             return format_prompt(default, values)
 
+    def _cache_platform_send_context(self, event: AstrMessageEvent) -> None:
+        """保存重启后主动发送所需的平台临时上下文。"""
+        self.cache["session_id"] = event.session_id
+        self.cache["qqofficial_scene"] = ""
+        self.cache["qqofficial_msg_id"] = ""
+
+        platform = self.context.get_platform_inst(event.get_platform_id())
+        if platform is None or platform.meta().name != QQ_OFFICIAL_PLATFORM_NAME:
+            return
+
+        scenes = getattr(platform, "_session_scene", {})
+        message_ids = getattr(platform, "_session_last_message_id", {})
+        self.cache["qqofficial_scene"] = str(scenes.get(event.session_id) or "")
+        self.cache["qqofficial_msg_id"] = str(
+            getattr(event.message_obj, "message_id", "")
+            or message_ids.get(event.session_id)
+            or ""
+        )
+
+    def _restore_platform_send_context(self, platform: Any) -> None:
+        """恢复 QQ 官方适配器重启时丢失的内存会话缓存。"""
+        if platform.meta().name != QQ_OFFICIAL_PLATFORM_NAME:
+            return
+
+        session_id = str(self.cache.get("session_id") or "")
+        scene = str(self.cache.get("qqofficial_scene") or "")
+        message_id = str(self.cache.get("qqofficial_msg_id") or "")
+        if not session_id:
+            return
+
+        if scene and hasattr(platform, "remember_session_scene"):
+            platform.remember_session_scene(session_id, scene)
+        if message_id and hasattr(platform, "remember_session_message_id"):
+            platform.remember_session_message_id(session_id, message_id)
+
     async def _send_completed_notification_when_ready(self):
         platform_id = self.cache.get("platform_id")
         restart_umo = self.cache.get("umo")
@@ -113,11 +149,13 @@ class RestartPlugin(Star):
         deadline = time.monotonic() + NOTIFICATION_TIMEOUT
         last_error: Exception | None = None
         while time.monotonic() < deadline:
-            if self.context.get_platform_inst(str(platform_id)) is None:
+            platform = self.context.get_platform_inst(str(platform_id))
+            if platform is None:
                 await asyncio.sleep(NOTIFICATION_RETRY_INTERVAL)
                 continue
 
             try:
+                self._restore_platform_send_context(platform)
                 values = self._prompt_values(
                     restart_start_ts=restart_start_ts,
                     before_memory=str(self.cache.get("memory_before") or "未知"),
@@ -156,6 +194,9 @@ class RestartPlugin(Star):
         self.cache["umo"] = ""
         self.cache["start_ts"] = 0
         self.cache["memory_before"] = ""
+        self.cache["session_id"] = ""
+        self.cache["qqofficial_scene"] = ""
+        self.cache["qqofficial_msg_id"] = ""
         self.config.save_config()
 
     # ================== 命令 ==================
@@ -177,6 +218,7 @@ class RestartPlugin(Star):
         self.cache["umo"] = event.unified_msg_origin
         self.cache["start_ts"] = restart_start_ts
         self.cache["memory_before"] = memory["memory"]
+        self._cache_platform_send_context(event)
         self.config.save_config()
 
         await self.dashboard.restart()

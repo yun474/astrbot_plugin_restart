@@ -49,6 +49,18 @@
             "memory_before": {
                 "description": "重启前内存信息",
                 "type": "string"
+            },
+            "session_id": {
+                "description": "重启命令所在会话 ID",
+                "type": "string"
+            },
+            "qqofficial_scene": {
+                "description": "QQ 官方适配器会话场景",
+                "type": "string"
+            },
+            "qqofficial_msg_id": {
+                "description": "QQ 官方适配器最近消息 ID",
+                "type": "string"
             }
         }
     }

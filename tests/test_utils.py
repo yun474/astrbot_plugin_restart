@@ -1,8 +1,16 @@
 import unittest
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from utils import format_prompt, get_memory_info, get_memory_placeholders
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from astrbot_plugin_restart.utils import (  # noqa: E402
+    format_prompt,
+    get_memory_info,
+    get_memory_placeholders,
+)
 
 
 class PromptUtilsTests(unittest.TestCase):
