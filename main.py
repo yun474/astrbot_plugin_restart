@@ -2,6 +2,7 @@
 import asyncio
 import time
 from contextlib import suppress
+from copy import copy
 from datetime import datetime
 from typing import Any
 
@@ -35,8 +36,11 @@ class RestartPlugin(Star):
         self.config = config
         self.cache: dict[str, Any] = config.get("restart_cache", {})
         self.config["restart_cache"] = self.cache
+        # 只恢复本次加载时已有的记录，不能把本进程刚收到的重启命令当作完成。
+        self._pending_restart = self.cache.copy()
         self.restart_cron = config.get("restart_cron")
         self._notification_task: asyncio.Task | None = None
+        self._terminated = False
 
     # ================== 生命周期 ==================
 
@@ -46,14 +50,30 @@ class RestartPlugin(Star):
         self.scheduler = RestartScheduler(self.context, self.config, self.dashboard)
         if self.config["restart_switch"]:
             await self.scheduler.start()
-        # 插件会早于平台初始化。主动重试恢复通知，避免依赖一次性的
-        # on_platform_loaded / WebSocket 回调所产生的启动竞态。
+        # 冷启动时平台尚未加载，等核心加载完成再开始计时。
+        # 热重载不会再次触发 on_astrbot_loaded，已有目标平台时直接恢复。
+        platform_id = self._pending_restart.get("platform_id")
+        if platform_id and self.context.get_platform_inst(str(platform_id)) is not None:
+            self._start_completed_notification()
+
+    @filter.on_astrbot_loaded()
+    async def on_astrbot_loaded(self):
+        self._start_completed_notification()
+
+    def _start_completed_notification(self) -> None:
+        if self._terminated or self._notification_task is not None:
+            return
+        if not all(
+            self._pending_restart.get(k) for k in ("platform_id", "umo", "start_ts")
+        ):
+            return
         self._notification_task = asyncio.create_task(
             self._send_completed_notification_when_ready(),
             name="restart_completed_notification",
         )
 
     async def terminate(self):
+        self._terminated = True
         if self._notification_task and not self._notification_task.done():
             self._notification_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -112,12 +132,18 @@ class RestartPlugin(Star):
         if platform is None or platform.meta().name != QQ_OFFICIAL_PLATFORM_NAME:
             return
 
+        # 群独立会话会把 event.session_id 改成 用户ID_群ID；适配器缓存用原始 ID。
+        session_id = event.message_obj.session_id
+        self.cache["session_id"] = session_id
+        session = copy(event.session)
+        session.session_id = session_id
+        self.cache["umo"] = str(session)
         scenes = getattr(platform, "_session_scene", {})
         message_ids = getattr(platform, "_session_last_message_id", {})
-        self.cache["qqofficial_scene"] = str(scenes.get(event.session_id) or "")
+        self.cache["qqofficial_scene"] = str(scenes.get(session_id) or "")
         self.cache["qqofficial_msg_id"] = str(
             getattr(event.message_obj, "message_id", "")
-            or message_ids.get(event.session_id)
+            or message_ids.get(session_id)
             or ""
         )
 
@@ -129,18 +155,21 @@ class RestartPlugin(Star):
         session_id = str(self.cache.get("session_id") or "")
         scene = str(self.cache.get("qqofficial_scene") or "")
         message_id = str(self.cache.get("qqofficial_msg_id") or "")
-        if not session_id:
-            return
+        if not session_id or scene not in {"group", "channel", "friend"}:
+            raise RuntimeError(
+                "QQ 官方重启通知缺少原始会话 ID 或场景，无法恢复发送上下文"
+            )
+        if scene != "friend" and not message_id:
+            raise RuntimeError("QQ 官方群/频道重启通知缺少消息 ID，无法恢复发送上下文")
 
-        if scene and hasattr(platform, "remember_session_scene"):
-            platform.remember_session_scene(session_id, scene)
-        if message_id and hasattr(platform, "remember_session_message_id"):
+        platform.remember_session_scene(session_id, scene)
+        if message_id:
             platform.remember_session_message_id(session_id, message_id)
 
     async def _send_completed_notification_when_ready(self):
-        platform_id = self.cache.get("platform_id")
-        restart_umo = self.cache.get("umo")
-        restart_start_ts = self.cache.get("start_ts")
+        platform_id = self._pending_restart.get("platform_id")
+        restart_umo = self._pending_restart.get("umo")
+        restart_start_ts = self._pending_restart.get("start_ts")
 
         if not restart_umo or not platform_id or not restart_start_ts:
             return
@@ -149,6 +178,8 @@ class RestartPlugin(Star):
         deadline = time.monotonic() + NOTIFICATION_TIMEOUT
         last_error: Exception | None = None
         while time.monotonic() < deadline:
+            if self.cache != self._pending_restart:
+                return
             platform = self.context.get_platform_inst(str(platform_id))
             if platform is None:
                 await asyncio.sleep(NOTIFICATION_RETRY_INTERVAL)
@@ -173,7 +204,8 @@ class RestartPlugin(Star):
                     timeout=SEND_TIMEOUT,
                 )
                 if sent:
-                    self._clear_restart_cache()
+                    if self.cache == self._pending_restart:
+                        self._clear_restart_cache()
                     logger.info("重启完成通知已发送")
                     return
             except asyncio.CancelledError:
